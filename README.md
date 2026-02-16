@@ -117,6 +117,15 @@ POLYROUTER_MARKET_PAGE_LIMIT=4
 POLYROUTER_ORDERBOOK_BATCH_SIZE=50
 ```
 
+## Demo Fallback Toggle
+
+By default, demo market seeding is disabled so only live data is shown.
+If you want offline/demo behavior explicitly, set:
+
+```bash
+ENABLE_DEMO_FALLBACK=true
+```
+
 ## API endpoints
 
 - `GET /health`

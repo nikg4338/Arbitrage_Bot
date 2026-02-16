@@ -5,6 +5,7 @@ from sqlalchemy.orm import Session
 
 from db import get_session
 from models import CanonicalEvent, MispricingSignal
+from settings import get_settings
 
 router = APIRouter(prefix="/signals", tags=["signals"])
 
@@ -16,7 +17,13 @@ def list_signals(
     competition: str | None = Query(default=None),
     session: Session = Depends(get_session),
 ) -> list[dict]:
+    settings = get_settings()
     query = session.query(MispricingSignal).filter(MispricingSignal.status == "OPEN")
+    if not settings.enable_demo_fallback:
+        query = query.filter(
+            ~MispricingSignal.buy_market_id.like("%demo%"),
+            ~MispricingSignal.sell_market_id.like("%demo%"),
+        )
     if min_edge > 0:
         query = query.filter(MispricingSignal.edge_after_costs >= min_edge)
 

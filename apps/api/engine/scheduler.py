@@ -78,6 +78,7 @@ class AppScheduler:
         self.hub = SignalHub()
         self._stop_event = asyncio.Event()
         self._tasks: list[asyncio.Task[Any]] = []
+        self._demo_rows_purged = False
         self._last_snapshot: dict[str, Any] = {
             "type": "snapshot",
             "data_source": self._active_market_data_source(),
@@ -139,6 +140,10 @@ class AppScheduler:
             await asyncio.sleep(self.settings.discovery_interval_sec)
 
     async def _run_discovery_cycle(self) -> None:
+        if not self.settings.enable_demo_fallback and not self._demo_rows_purged:
+            self._purge_demo_data()
+            self._demo_rows_purged = True
+
         source = self._active_market_data_source()
         poly_markets, kalshi_markets = await self._discover_markets_from_source(source)
 
@@ -146,7 +151,20 @@ class AppScheduler:
         kalshi_markets = self._apply_sport_toggles(kalshi_markets)
 
         if not poly_markets or not kalshi_markets:
-            poly_markets, kalshi_markets = self._demo_markets()
+            if self.settings.enable_demo_fallback:
+                poly_markets, kalshi_markets = self._demo_markets()
+            else:
+                logger.warning(
+                    "discovery returned insufficient live markets; demo fallback disabled",
+                    extra={
+                        "context": {
+                            "source": source,
+                            "poly_markets": len(poly_markets),
+                            "kalshi_markets": len(kalshi_markets),
+                        }
+                    },
+                )
+                return
 
         overrides = load_overrides(self.settings.overrides_path)
         pairs = resolve_markets(poly_markets, kalshi_markets, overrides=overrides)
@@ -189,25 +207,38 @@ class AppScheduler:
 
     def _build_snapshot(self) -> dict[str, Any]:
         with session_scope() as session:
+            signals_query = session.query(MispricingSignal).filter(MispricingSignal.status == "OPEN")
+            if not self.settings.enable_demo_fallback:
+                signals_query = signals_query.filter(
+                    ~MispricingSignal.buy_market_id.like("%demo%"),
+                    ~MispricingSignal.sell_market_id.like("%demo%"),
+                )
+
             signals = (
-                session.query(MispricingSignal)
-                .filter(MispricingSignal.status == "OPEN")
+                signals_query
                 .order_by(MispricingSignal.edge_after_costs.desc())
                 .limit(100)
                 .all()
             )
+
             events = {
                 row.id: row
                 for row in session.query(CanonicalEvent)
                 .filter(CanonicalEvent.id.in_([signal.canonical_event_id for signal in signals]))
                 .all()
             }
+
+            orderbook_query = session.query(OrderBookTop)
+            if not self.settings.enable_demo_fallback:
+                orderbook_query = orderbook_query.filter(~OrderBookTop.venue_market_id.like("%demo%"))
+
             orderbooks = (
-                session.query(OrderBookTop)
+                orderbook_query
                 .order_by(OrderBookTop.ts.desc())
                 .limit(200)
                 .all()
             )
+
             snapshots = (
                 session.query(PortfolioSnapshot)
                 .order_by(PortfolioSnapshot.ts.desc())
@@ -270,6 +301,18 @@ class AppScheduler:
                     for row in reversed(snapshots)
                 ],
             }
+
+    def _purge_demo_data(self) -> None:
+        with session_scope() as session:
+            session.query(MispricingSignal).filter(
+                MispricingSignal.buy_market_id.like("%demo%") | MispricingSignal.sell_market_id.like("%demo%")
+            ).delete(synchronize_session=False)
+
+            session.query(OrderBookTop).filter(OrderBookTop.venue_market_id.like("%demo%")).delete(synchronize_session=False)
+            session.query(MarketBinding).filter(MarketBinding.venue_market_id.like("%demo%")).delete(synchronize_session=False)
+
+            bound_event_ids = session.query(MarketBinding.canonical_event_id).distinct()
+            session.query(CanonicalEvent).filter(~CanonicalEvent.id.in_(bound_event_ids)).delete(synchronize_session=False)
 
     async def _discover_markets_from_source(self, source: str) -> tuple[list[VenueMarket], list[VenueMarket]]:
         if source == "polyrouter":
@@ -413,7 +456,7 @@ class AppScheduler:
             updated_at=now,
         )
         stmt = stmt.on_conflict_do_update(
-            index_elements=["canonical_event_id", "venue"],
+            index_elements=["venue", "venue_market_id"],
             set_={
                 "canonical_event_id": pair.event_id,
                 "outcome_schema": "YES_NO",

@@ -36,6 +36,7 @@ class Settings(BaseSettings):
     polyrouter_req_per_min: int = 80
     polyrouter_market_page_limit: int = 4
     polyrouter_orderbook_batch_size: int = 50
+    enable_demo_fallback: bool = False
 
     min_edge: float = 0.008
     slippage_k: float = 0.20
