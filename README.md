@@ -60,7 +60,7 @@ README.md
 ### 1) Backend
 
 ```bash
-cp .env.example apps/api/.env
+cp .env apps/api/.env
 cd apps/api
 python3 -m venv .venv
 source .venv/bin/activate
