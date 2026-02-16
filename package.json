@@ -1,0 +1,8 @@
+{
+  "name": "mispricing-lab",
+  "private": true,
+  "workspaces": [
+    "apps/web",
+    "packages/core"
+  ]
+}
