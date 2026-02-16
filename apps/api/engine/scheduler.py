@@ -280,6 +280,7 @@ class AppScheduler:
         self._mark_health("poly_clob", ok=ok, detail={"requested": len(market_ids)})
 
     def _upsert_event(self, session: Any, pair: Any) -> None:
+        now = datetime.now(timezone.utc)
         stmt = insert(CanonicalEvent).values(
             id=pair.event_id,
             sport=pair.sport,
@@ -288,6 +289,7 @@ class AppScheduler:
             home_team=pair.home_team,
             away_team=pair.away_team,
             title_canonical=pair.title_canonical,
+            created_at=now,
         )
         stmt = stmt.on_conflict_do_update(
             index_elements=["id"],
@@ -304,6 +306,7 @@ class AppScheduler:
 
     def _upsert_binding(self, session: Any, pair: Any, *, venue: str) -> None:
         market = pair.poly if venue == "POLY" else pair.kalshi
+        now = datetime.now(timezone.utc)
         stmt = insert(MarketBinding).values(
             canonical_event_id=pair.event_id,
             venue=venue,
@@ -313,9 +316,10 @@ class AppScheduler:
             status=pair.status,
             confidence=pair.confidence,
             evidence_json=pair.evidence_json,
+            updated_at=now,
         )
         stmt = stmt.on_conflict_do_update(
-            index_elements=["venue", "venue_market_id"],
+            index_elements=["canonical_event_id", "venue"],
             set_={
                 "canonical_event_id": pair.event_id,
                 "outcome_schema": "YES_NO",
@@ -323,7 +327,7 @@ class AppScheduler:
                 "status": pair.status,
                 "confidence": pair.confidence,
                 "evidence_json": pair.evidence_json,
-                "updated_at": datetime.now(timezone.utc),
+                "updated_at": now,
             },
         )
         session.execute(stmt)

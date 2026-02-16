@@ -79,6 +79,13 @@ def _title_score(poly: VenueMarket, kalshi: VenueMarket) -> float:
     return token_set_similarity(poly.title, kalshi.title)
 
 
+def _combined_score(sport: str, team_score: float, time_score: float, title_score: float) -> float:
+    # NBA titles differ across venues ("X vs Y" vs "X at Y Winner?"); downweight title noise.
+    if sport == "NBA":
+        return 0.6 * team_score + 0.35 * time_score + 0.05 * title_score
+    return 0.5 * team_score + 0.3 * time_score + 0.2 * title_score
+
+
 def _within_time_window(poly: VenueMarket, kalshi: VenueMarket) -> bool:
     if not poly.start_time_utc or not kalshi.start_time_utc:
         return True
@@ -97,6 +104,7 @@ def _is_supported_competition(market: VenueMarket) -> bool:
 
 def _decision(
     score: float,
+    score_parts: dict[str, float],
     poly: VenueMarket,
     kalshi: VenueMarket,
     orientation_flipped: bool,
@@ -116,6 +124,11 @@ def _decision(
 
     if poly.start_time_utc is None or kalshi.start_time_utc is None:
         return "REVIEW"
+
+    # Conservative NBA auto uplift when team/time agreement is near perfect.
+    if poly.sport == "NBA":
+        if score_parts.get("team", 0.0) >= 0.98 and score_parts.get("time", 0.0) >= 0.95 and score >= 0.82:
+            return "AUTO"
 
     if score >= 0.86:
         return "AUTO"
@@ -156,7 +169,7 @@ def resolve_markets(
             time_score = _time_score(poly, kalshi)
             title_score = _title_score(poly, kalshi)
 
-            total_score = 0.5 * team_score + 0.3 * time_score + 0.2 * title_score
+            total_score = _combined_score(poly.sport, team_score, time_score, title_score)
             candidate_rows.append(
                 (
                     total_score,
@@ -191,7 +204,7 @@ def resolve_markets(
         )
 
         override = overrides.get((poly.venue_market_id, best_kalshi.venue_market_id))
-        decision = _decision(best_score, poly, best_kalshi, orientation_flipped, override)
+        decision = _decision(best_score, score_details, poly, best_kalshi, orientation_flipped, override)
         confidence = float(override.get("confidence", best_score)) if override else best_score
 
         evidence = {

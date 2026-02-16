@@ -17,6 +17,7 @@ TEAM_SPLIT_PATTERNS = [
     re.compile(r"(?P<home>.+?)\s+(?:vs\.?|v|@|at)\s+(?P<away>.+)", re.IGNORECASE),
     re.compile(r"(?P<home>.+?)\s+-\s+(?P<away>.+)", re.IGNORECASE),
 ]
+WORD_RE = re.compile(r"[a-z0-9]+")
 
 
 @dataclass(slots=True)
@@ -38,6 +39,8 @@ def parse_time(value: Any) -> datetime | None:
     if value is None:
         return None
     if isinstance(value, datetime):
+        if value.tzinfo is None:
+            return value.replace(tzinfo=timezone.utc)
         return value.astimezone(timezone.utc)
     if isinstance(value, (int, float)):
         return datetime.fromtimestamp(value, tz=timezone.utc)
@@ -66,9 +69,10 @@ def canonicalize_team(sport: str, raw_team: str | None) -> str | None:
     if normalized in aliases:
         return aliases[normalized]
 
-    # Try alias match by substring against known keys.
-    for alias, canonical in aliases.items():
-        if alias in normalized:
+    # Fallback alias match with word boundaries (avoids short-code false positives like "den" in "golden").
+    for alias, canonical in sorted(aliases.items(), key=lambda item: len(item[0]), reverse=True):
+        pattern = rf"(^|\s){re.escape(alias)}($|\s)"
+        if re.search(pattern, normalized):
             return canonical
     return normalized
 
@@ -84,40 +88,73 @@ def parse_teams_from_title(title: str) -> tuple[str | None, str | None]:
     return None, None
 
 
-def detect_sport(title: str, category: str | None = None, tags: list[str] | None = None) -> str:
-    haystacks = [title.lower()]
+def _text_chunks(title: str, category: str | None, tags: list[str] | None) -> list[str]:
+    chunks = [title.lower()]
     if category:
-        haystacks.append(category.lower())
+        chunks.append(category.lower())
     if tags:
-        haystacks.extend(tag.lower() for tag in tags)
-    joined = " ".join(haystacks)
+        chunks.extend(tag.lower() for tag in tags if tag)
+    return chunks
 
-    nba_keywords = {"nba", "basketball"}
-    soccer_keywords = {"soccer", "football", "epl", "ucl", "uel", "laliga", "la liga"}
 
-    if any(keyword in joined for keyword in nba_keywords):
+def _token_set(chunks: list[str]) -> set[str]:
+    tokens: set[str] = set()
+    for chunk in chunks:
+        tokens.update(WORD_RE.findall(chunk))
+    return tokens
+
+
+def detect_sport(title: str, category: str | None = None, tags: list[str] | None = None) -> str:
+    chunks = _text_chunks(title, category, tags)
+    joined = " ".join(chunks)
+    tokens = _token_set(chunks)
+
+    if "nba" in tokens or "basketball" in tokens:
         return "NBA"
-    if any(keyword in joined for keyword in soccer_keywords):
+    if any(chunk.startswith("nba-") for chunk in chunks):
+        return "NBA"
+
+    soccer_tokens = {"soccer", "football", "epl", "ucl", "uel", "laliga", "mls"}
+    if tokens & soccer_tokens:
         return "SOCCER"
+    if "premier league" in joined or "champions league" in joined or "europa league" in joined or "la liga" in joined:
+        return "SOCCER"
+    if any(chunk.startswith(prefix) for chunk in chunks for prefix in ("epl-", "ucl-", "uel-", "lal-", "laliga-")):
+        return "SOCCER"
+
     return "UNKNOWN"
 
 
 def detect_competition(sport: str, title: str, tags: list[str] | None = None, explicit: str | None = None) -> str | None:
+    if explicit:
+        normalized = explicit.upper().strip()
+        if normalized == "NBA":
+            return "NBA"
+        if normalized in SUPPORTED_SOCCER_COMPETITIONS:
+            return normalized
+
     if sport == "NBA":
         return "NBA"
     if sport != "SOCCER":
         return None
 
-    candidates: list[str] = []
-    if explicit:
-        candidates.append(explicit.lower())
-    candidates.append(title.lower())
-    if tags:
-        candidates.extend(tag.lower() for tag in tags)
+    chunks = _text_chunks(title, None, tags)
+    joined = " ".join(chunks)
+    tokens = _token_set(chunks)
 
-    joined = " ".join(candidates)
+    if "epl" in tokens or "premier league" in joined:
+        return "EPL"
+    if "ucl" in tokens or "champions league" in joined:
+        return "UCL"
+    if "uel" in tokens or "europa league" in joined:
+        return "UEL"
+    if "laliga" in tokens or "la liga" in joined or any(chunk.startswith("lal-") for chunk in chunks):
+        return "LALIGA"
+
+    # Fallback to configured keyword table.
     for keyword, competition in SOCCER_COMPETITION_KEYWORDS.items():
-        if keyword in joined:
+        pattern = rf"\b{re.escape(keyword)}\b"
+        if re.search(pattern, joined):
             if competition in SUPPORTED_SOCCER_COMPETITIONS:
                 return competition
             return None
