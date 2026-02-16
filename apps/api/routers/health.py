@@ -8,7 +8,4 @@ router = APIRouter(prefix="/health", tags=["health"])
 @router.get("")
 def health(request: Request) -> dict:
     scheduler = request.app.state.scheduler
-    return {
-        "status": "ok",
-        "connectors": scheduler.health_payload(),
-    }
+    return {"status": "ok", **scheduler.health_payload()}

@@ -97,6 +97,26 @@ npm run dev
 5. Click **Simulate** to create a paper position.
 6. Monitor paper PnL and execution quality in **Paper Portfolio**.
 
+## Optional Polyrouter Mode
+
+The backend defaults to direct venue connectors (`Polymarket Gamma/CLOB + Kalshi REST`).
+To route market discovery + orderbooks through Polyrouter instead, set in `apps/api/.env`:
+
+```bash
+MARKET_DATA_SOURCE=polyrouter
+POLYROUTER_ENABLE=true
+POLYROUTER_KEY=your_key_here
+```
+
+Optional tuning:
+
+```bash
+POLYROUTER_BASE_URL=https://api-v2.polyrouter.io
+POLYROUTER_REQ_PER_MIN=80
+POLYROUTER_MARKET_PAGE_LIMIT=4
+POLYROUTER_ORDERBOOK_BATCH_SIZE=50
+```
+
 ## API endpoints
 
 - `GET /health`

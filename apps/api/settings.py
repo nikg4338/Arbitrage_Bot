@@ -3,7 +3,7 @@ from __future__ import annotations
 from functools import lru_cache
 from pathlib import Path
 
-from pydantic import Field
+from pydantic import AliasChoices, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -25,6 +25,17 @@ class Settings(BaseSettings):
     kalshi_ws_url: str = "wss://api.elections.kalshi.com/trade-api/ws/v2"
     kalshi_key_id: str | None = None
     kalshi_private_key_path: str | None = None
+
+    market_data_source: str = "direct"
+    polyrouter_enable: bool = False
+    polyrouter_base_url: str = "https://api-v2.polyrouter.io"
+    polyrouter_api_key: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices("POLYROUTER_API_KEY", "POLYROUTER_KEY"),
+    )
+    polyrouter_req_per_min: int = 80
+    polyrouter_market_page_limit: int = 4
+    polyrouter_orderbook_batch_size: int = 50
 
     min_edge: float = 0.008
     slippage_k: float = 0.20

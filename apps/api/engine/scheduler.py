@@ -13,6 +13,7 @@ from connectors.kalshi_rest import KalshiRestClient
 from connectors.kalshi_ws import KalshiWsClient
 from connectors.polymarket_clob import PolymarketClobClient
 from connectors.polymarket_gamma import PolymarketGammaClient
+from connectors.polyrouter import PolyrouterClient
 from db import session_scope
 from engine.orderbook import OrderBookService
 from engine.signaler import refresh_signals
@@ -72,17 +73,24 @@ class AppScheduler:
         self.poly_clob = PolymarketClobClient(settings)
         self.kalshi_rest = KalshiRestClient(settings)
         self.kalshi_ws = KalshiWsClient(settings)
+        self.polyrouter = PolyrouterClient(settings)
 
         self.hub = SignalHub()
         self._stop_event = asyncio.Event()
         self._tasks: list[asyncio.Task[Any]] = []
-        self._last_snapshot: dict[str, Any] = {"type": "snapshot", "signals": [], "orderbooks": []}
+        self._last_snapshot: dict[str, Any] = {
+            "type": "snapshot",
+            "data_source": self._active_market_data_source(),
+            "signals": [],
+            "orderbooks": [],
+        }
 
         self.health = {
             "gamma": ConnectorHealth(name="gamma"),
             "kalshi_rest": ConnectorHealth(name="kalshi_rest"),
             "poly_clob": ConnectorHealth(name="poly_clob"),
             "kalshi_ws": ConnectorHealth(name="kalshi_ws"),
+            "polyrouter": ConnectorHealth(name="polyrouter"),
         }
 
     async def start(self) -> None:
@@ -101,9 +109,10 @@ class AppScheduler:
         await self.gamma.close()
         await self.kalshi_rest.close()
         await self.poly_clob.close()
+        await self.polyrouter.close()
 
     def health_payload(self) -> dict[str, Any]:
-        return {
+        connectors = {
             name: {
                 "ok": row.ok,
                 "last_ok": row.last_ok,
@@ -111,6 +120,11 @@ class AppScheduler:
                 "detail": row.detail,
             }
             for name, row in self.health.items()
+        }
+        return {
+            "active_data_source": self._active_market_data_source(),
+            "configured_data_source": str(self.settings.market_data_source).strip().lower(),
+            "connectors": connectors,
         }
 
     def latest_snapshot(self) -> dict[str, Any]:
@@ -125,14 +139,11 @@ class AppScheduler:
             await asyncio.sleep(self.settings.discovery_interval_sec)
 
     async def _run_discovery_cycle(self) -> None:
-        poly_markets = await self.gamma.discover_markets()
-        kalshi_markets = await self.kalshi_rest.discover_markets()
+        source = self._active_market_data_source()
+        poly_markets, kalshi_markets = await self._discover_markets_from_source(source)
 
         poly_markets = self._apply_sport_toggles(poly_markets)
         kalshi_markets = self._apply_sport_toggles(kalshi_markets)
-
-        self._mark_health("gamma", ok=bool(poly_markets), detail={"markets": len(poly_markets)})
-        self._mark_health("kalshi_rest", ok=bool(kalshi_markets), detail={"markets": len(kalshi_markets)})
 
         if not poly_markets or not kalshi_markets:
             poly_markets, kalshi_markets = self._demo_markets()
@@ -149,8 +160,11 @@ class AppScheduler:
             for market in poly_markets + kalshi_markets:
                 self._seed_orderbook_from_market(session, market)
 
-        # Best-effort snapshot pulls for resolved Polymarket markets.
-        await self._refresh_poly_books([pair.poly.venue_market_id for pair in pairs])
+        if source == "polyrouter":
+            await self._refresh_polyrouter_books(pairs)
+        else:
+            # Best-effort snapshot pulls for resolved Polymarket markets.
+            await self._refresh_poly_books([pair.poly.venue_market_id for pair in pairs])
 
     async def _signal_loop(self) -> None:
         while not self._stop_event.is_set():
@@ -231,6 +245,7 @@ class AppScheduler:
             return {
                 "type": "snapshot",
                 "ts": datetime.now(timezone.utc).isoformat(),
+                "data_source": self._active_market_data_source(),
                 "signals": rows,
                 "orderbooks": [
                     {
@@ -256,6 +271,34 @@ class AppScheduler:
                 ],
             }
 
+    async def _discover_markets_from_source(self, source: str) -> tuple[list[VenueMarket], list[VenueMarket]]:
+        if source == "polyrouter":
+            poly_markets = await self.polyrouter.discover_markets_by_platform("polymarket")
+            kalshi_markets = await self.polyrouter.discover_markets_by_platform("kalshi")
+
+            self._mark_health(
+                "polyrouter",
+                ok=bool(poly_markets or kalshi_markets),
+                detail={
+                    "source": "polyrouter",
+                    "poly_markets": len(poly_markets),
+                    "kalshi_markets": len(kalshi_markets),
+                },
+            )
+            self._mark_health("gamma", ok=False, detail={"active": False, "source": "polyrouter"})
+            self._mark_health("kalshi_rest", ok=False, detail={"active": False, "source": "polyrouter"})
+            self._mark_health("poly_clob", ok=False, detail={"active": False, "source": "polyrouter"})
+            return poly_markets, kalshi_markets
+
+        poly_markets = await self.gamma.discover_markets()
+        kalshi_markets = await self.kalshi_rest.discover_markets()
+
+        polyrouter_ready = self.settings.polyrouter_enable and bool(self.settings.polyrouter_api_key)
+        self._mark_health("gamma", ok=bool(poly_markets), detail={"source": "direct", "markets": len(poly_markets)})
+        self._mark_health("kalshi_rest", ok=bool(kalshi_markets), detail={"source": "direct", "markets": len(kalshi_markets)})
+        self._mark_health("polyrouter", ok=False, detail={"active": False, "configured": polyrouter_ready, "source": "direct"})
+        return poly_markets, kalshi_markets
+
     async def _refresh_poly_books(self, market_ids: list[str]) -> None:
         if not market_ids:
             return
@@ -278,6 +321,57 @@ class AppScheduler:
                     ask_size=top["ask_size"],
                 )
         self._mark_health("poly_clob", ok=ok, detail={"requested": len(market_ids)})
+
+    async def _refresh_polyrouter_books(self, pairs: list[Any]) -> None:
+        if not pairs:
+            self._mark_health("polyrouter", ok=False, detail={"source": "polyrouter", "requested": 0, "updated": 0})
+            return
+
+        poly_lookup_ids = [
+            str(pair.poly.raw.get("polyrouter_lookup_id") or pair.poly.venue_market_id)
+            for pair in pairs
+            if getattr(pair, "poly", None) is not None
+        ]
+        kalshi_lookup_ids = [
+            str(pair.kalshi.raw.get("polyrouter_lookup_id") or pair.kalshi.venue_market_id)
+            for pair in pairs
+            if getattr(pair, "kalshi", None) is not None
+        ]
+
+        tops: list[dict[str, Any]] = []
+        if poly_lookup_ids:
+            tops.extend(await self.polyrouter.fetch_orderbooks("polymarket", poly_lookup_ids))
+        if kalshi_lookup_ids:
+            tops.extend(await self.polyrouter.fetch_orderbooks("kalshi", kalshi_lookup_ids))
+
+        for top in tops:
+            with session_scope() as session:
+                OrderBookService.upsert_top(
+                    session,
+                    venue=top["venue"],
+                    venue_market_id=top["venue_market_id"],
+                    outcome=top["outcome"],
+                    best_bid=top["best_bid"],
+                    best_ask=top["best_ask"],
+                    bid_size=top["bid_size"],
+                    ask_size=top["ask_size"],
+                )
+
+        self._mark_health(
+            "polyrouter",
+            ok=bool(tops),
+            detail={
+                "source": "polyrouter",
+                "requested": len(poly_lookup_ids) + len(kalshi_lookup_ids),
+                "updated": len(tops),
+            },
+        )
+
+    def _active_market_data_source(self) -> str:
+        configured = str(self.settings.market_data_source).strip().lower()
+        if configured == "polyrouter" and self.settings.polyrouter_enable and self.settings.polyrouter_api_key:
+            return "polyrouter"
+        return "direct"
 
     def _upsert_event(self, session: Any, pair: Any) -> None:
         now = datetime.now(timezone.utc)

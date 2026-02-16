@@ -82,6 +82,7 @@ export interface PortfolioStats {
 export interface SnapshotPayload {
   type: "snapshot";
   ts: string;
+  data_source?: "direct" | "polyrouter" | string;
   signals: SignalRow[];
   orderbooks: OrderbookRow[];
   equity_curve: Array<{ ts: string; equity: number; realized: number; unrealized: number }>;
