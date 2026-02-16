@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 
 from engine.fees import total_fee_rate
@@ -60,4 +61,7 @@ def suggested_size(
     by_depth = visible_depth / max(depth_multiplier, 1.0)
     best_price = max(buy_quote.ask, 0.01)
     by_notional = max_notional_per_event / best_price
-    return round(max(0.0, min(by_depth, by_notional)), 4)
+    raw_size = max(0.0, min(by_depth, by_notional))
+
+    # Floor (not round) to avoid tiny depth-overrun artifacts in strict depth checks.
+    return math.floor(raw_size * 10_000) / 10_000

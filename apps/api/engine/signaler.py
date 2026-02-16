@@ -27,7 +27,8 @@ def refresh_signals(session: Session, settings: Settings) -> list[MispricingSign
     created: list[MispricingSignal] = []
 
     for pair in pairs:
-        if pair.event.start_time_utc < earliest:
+        event_start = _as_utc(pair.event.start_time_utc)
+        if event_start < earliest:
             continue
 
         for outcome in ("YES", "NO"):
@@ -39,6 +40,12 @@ def refresh_signals(session: Session, settings: Settings) -> list[MispricingSign
 
     session.commit()
     return created
+
+
+def _as_utc(value: datetime) -> datetime:
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)
 
 
 def _load_binding_pairs(session: Session) -> list[BindingPair]:
@@ -169,6 +176,7 @@ def _evaluate_pair(
 
 
 def _upsert_signal(session: Session, signal: MispricingSignal) -> None:
+    now = datetime.now(timezone.utc)
     stmt = insert(MispricingSignal).values(
         canonical_event_id=signal.canonical_event_id,
         outcome=signal.outcome,
@@ -183,6 +191,7 @@ def _upsert_signal(session: Session, signal: MispricingSignal) -> None:
         edge_after_costs=signal.edge_after_costs,
         confidence=signal.confidence,
         status=signal.status,
+        created_at=now,
     )
     stmt = stmt.on_conflict_do_update(
         index_elements=["canonical_event_id", "outcome", "buy_venue", "sell_venue"],
@@ -196,7 +205,7 @@ def _upsert_signal(session: Session, signal: MispricingSignal) -> None:
             "edge_after_costs": signal.edge_after_costs,
             "confidence": signal.confidence,
             "status": signal.status,
-            "created_at": datetime.now(timezone.utc),
+            "created_at": now,
         },
     )
     session.execute(stmt)
